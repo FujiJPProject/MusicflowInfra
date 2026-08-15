@@ -1,0 +1,95 @@
+services:
+  terraform:
+    # ============================================================
+    # Docker Imageのビルド設定
+    # ============================================================
+    build:
+      # Dockerfileのあるディレクトリを指定する。
+      context: ./docker
+      # contextディレクトリから見たDockerfile名
+      dockerfile: Dockerfile
+      args:
+        # Dockerfile側と同じ1.15.8を指定。
+        TERRAFORM_VERSION: "${TERRAFORM_VERSION:-1.15.8}"
+
+        # Dockerfile側と同じ2.36.23を指定。
+        AWS_CLI_VERSION: "${AWS_CLI_VERSION:-2.36.23}"
+
+        # ホストOSのUIDをDockerfileへ渡す。
+        #
+        # コンテナ内terraformユーザーのUIDをホストユーザーと一致させることで、
+        # .terraform.lock.hcl、tfplan等がroot所有になることを防ぐ。
+        HOST_UID: "${HOST_UID:-1000}"
+
+        # ホストOSのGIDをDockerfileへ渡す。
+        HOST_GID: "${HOST_GID:-1000}"
+
+    # ============================================================
+    # コンテナ起動時の作業ディレクトリ
+    # ============================================================
+    working_dir: /workspace/infra
+
+    # ============================================================
+    # 環境変数
+    # ============================================================
+    environment:
+      # 使用するAWS CLI / Terraform AWS Providerのprofile。
+      # ホスト側でexport AWS_PROFILE=music-infra-devのように指定できる。
+      # 未指定の場合はdefault profileを使用する。
+      AWS_PROFILE: "${AWS_PROFILE:-default}"
+
+      # Terraform AWS ProviderやAWS CLIで使用する
+      # デフォルトリージョン。
+      AWS_REGION: "${AWS_REGION:-ap-northeast-1}"
+
+      # AWS CLIや一部AWS SDKが参照するため、
+      # AWS_REGIONと同じ値を設定する。
+      AWS_DEFAULT_REGION: "${AWS_REGION:-ap-northeast-1}"
+
+      # AWS CLIが結果表示時にless等のpagerを起動しないようにする。
+      #
+      # Dockerfile側でもAWS_PAGER=""を指定しているが、
+      # Compose側で明示しておくことで実行設定が分かりやすくなる。
+      AWS_PAGER: ""
+
+      # Terraform Providerのキャッシュディレクトリ。
+      TF_PLUGIN_CACHE_DIR: /home/terraform/.terraform.d/plugin-cache
+
+    # ============================================================
+    # Volume
+    # ============================================================
+    volumes:
+      # ----------------------------------------------------------
+      # Terraformコード
+      # ----------------------------------------------------------
+
+      # ホスト側のinfraディレクトリをコンテナ内/workspace/infraへbind mountする。
+      - ./infra:/workspace/infra
+
+      # ----------------------------------------------------------
+      # AWS設定・認証情報
+      # ----------------------------------------------------------
+
+      # ホスト側の~/.awsをコンテナへread-onlyでmountする。
+      # Docker ImageへAWS Access KeyやSSO情報をCOPYしないための構成。
+      - ${HOME}/.aws:/home/terraform/.aws
+
+      # ----------------------------------------------------------
+      # Terraform Provider cache
+      # ----------------------------------------------------------
+
+      # 各Terraform root stackでhashicorp/aws Providerを毎回ダウンロードしないよう
+      # Provider cacheをホスト側へ永続化する。
+      - ./.terraform-plugin-cache:/home/terraform/.terraform.d/plugin-cache
+
+    # ==================================s==========================
+    # Terminal設定
+    # ============================================================
+
+    # docker compose run terraform で
+    # bashを対話的に使用できるよう標準入力を開く。
+    stdin_open: true
+
+    # 仮想TTYを割り当てる。
+    # TerraformのCLI出力を通常のターミナルと同様に扱える。
+    tty: true
