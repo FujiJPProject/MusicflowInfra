@@ -172,6 +172,7 @@ infra/
 │   ├── queue/
 │   ├── cognito/
 │   ├── rds/
+│   ├── app-config/
 │   ├── lambda-api/
 │   ├── api-gateway/
 │   ├── lambda-worker/
@@ -179,16 +180,18 @@ infra/
 │   ├── dns-acm/
 │   ├── monitoring/
 │   ├── cost-control/
+│   ├── scheduler/
 │   └── audit/
 ├── environments/
 │   └── dev/
-│       ├── 00-foundation/
-│       ├── 10-storage-queue/
-│       ├── 20-auth/
-│       ├── 30-database/
-│       ├── 40-backend/
-│       ├── 50-frontend/
-│       └── 60-operations/
+│       ├── 00-cost-control/
+│       ├── 10-foundation/
+│       ├── 20-storage-queue/
+│       ├── 30-auth/
+│       ├── 40-database/
+│       ├── 50-backend/
+│       ├── 60-frontend/
+│       └── 70-operations/
 ├── sandboxes/
 │   └── dev/
 │       ├── lambda/
@@ -221,39 +224,50 @@ infra/
 - dev本体とsandboxはstateを分離
 - moduleは再利用可能なサービス境界で分割する
 - `terraform_remote_state`はstack間の必要最低限のoutput共有に限定する
+- AWS Cost Explorerはアプリ用Terraform resourceとして作成する対象ではなく、Step 0でアカウント上の利用可能状態とコスト参照を確認する。
+- AWS Budgetsはstate backend作成後、`environments/dev/00-cost-control/`からTerraform管理する。
+- AWS Secrets ManagerはRDSの管理用シークレット用途とし、`modules/rds/`でRDSのマスターパスワード管理と一体で扱う。Terraform outputへはSecret ARN等の参照情報だけを出し、シークレット値は出力しない。
+- AWS Systems Manager Parameter Storeは`modules/app-config/`で非機密設定を管理し、Lambda側には必要なParameterだけを参照できるIAM権限を付与する。
+- Amazon EventBridge Schedulerは`modules/scheduler/`、Amazon SNSは`modules/monitoring/`で管理する。
+- 同一root stackを複数Stepで使用する場合は、**Stepごとに対象resource/moduleを追加して再度plan/applyする段階構築方式**とする。後続Stepまでのresourceを先に定義して一括作成しない。
+- 同一root stackを次Stepでも使用する場合、途中で`terraform destroy`しない。削除確認まで行うのは原則として`sandboxes/dev/*`のみとする。
+- `作成・更新Step`は、そのroot/moduleを初めて作成するStepだけでなく、後続Stepでresourceを追加するStepも記載する。
 
 ## 4.3 パス一覧
 
-| No. | パス | 種別 | 役割 | 主なresource | 主なmodule | 主なdata source | 主なvariables | 主なlocals | 主なoutputs | 依存先 | 作成Step | 削除時の注意 | 備考 |
-|---:|---|---|---|---|---|---|---|---|---|---|---:|---|---|
+| No. | パス | 種別 | 役割 | 主なresource | 主なmodule | 主なdata source | 主なvariables | 主なlocals | 主なoutputs | 依存先 | 作成・更新Step | 削除時の注意 | 備考 |
+|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 1 | `bootstrap/state-backend/` | bootstrap | tfstate基盤 | `aws_s3_bucket`等 | なし | `aws_caller_identity` | project、region | name_prefix | state bucket名 | なし | 1 | 原則手動で残す | 最後まで削除しない |
-| 2 | `modules/network/` | module | VPC/Subnet/SG/Endpoint | VPC関連 | network | AZ等 | CIDR | subnet map | VPC/Subnet/SG | bootstrap | 3 | 依存resource削除後 | NATなし |
-| 3 | `modules/frontend-storage/` | module | React用S3 | S3関連 | frontend-storage | IAM policy document | bucket設定 | bucket name | bucket名 | bootstrap | 4 | object/version削除 | Public Access禁止 |
-| 4 | `modules/audio-storage/` | module | 音声用S3 | S3関連 | audio-storage | IAM policy document | lifecycle等 | prefix | bucket ARN | bootstrap | 5 | Multipart/version確認 | Presigned URL用 |
-| 5 | `modules/queue/` | module | SQS/DLQ | `aws_sqs_queue` | queue | なし | retention、maxReceive | queue names | Queue/DLQ ARN | storage | 6 | message確認 | 音声非同期 |
-| 6 | `modules/cognito/` | module | 認証 | Cognito関連 | cognito | なし | callback等 | naming | Pool/Client ID | bootstrap | 8 | user消失注意 | `sub`利用 |
-| 7 | `modules/rds/` | module | PostgreSQL | RDS関連 | rds | AZ等 | class、storage | db naming | endpoint/port | network | 10 | final snapshot | deletion protection確認 |
-| 8 | `modules/lambda-api/` | module | Spring Boot API | Lambda関連 | lambda-api | IAM policy | memory、timeout | log names | function ARN | RDS/Auth | 11 | alias/version確認 | SnapStart |
-| 9 | `modules/api-gateway/` | module | HTTP API | API Gateway v2 | api-gateway | なし | routes | route map | API endpoint | Cognito/Lambda | 9/11 | route確認 | JWT Authorizer |
-| 10 | `modules/lambda-worker/` | module | 音声処理 | Lambda/event source | lambda-worker | IAM policy | memory、timeout | log names | worker ARN | SQS/RDS/S3 | 14 | mapping先に削除 | DLQ前提 |
-| 11 | `modules/cloudfront/` | module | React CDN | CloudFront/OAC | cloudfront | managed policy | domain/cache | origin IDs | distribution domain | frontend S3 | 15 | disable後削除 | OAC使用 |
-| 12 | `modules/dns-acm/` | module | DNS/TLS | Route53/ACM | dns-acm | hosted zone | domain | records | cert ARN | CloudFront | 16 | DNS順序注意 | 条件付き |
-| 13 | `modules/monitoring/` | module | Logs/Alarm | CloudWatch/SNS | monitoring | なし | thresholds | alarm names | Alarm ARN | backend等 | 17 | log残存確認 | retention設定 |
-| 14 | `modules/cost-control/` | module | Budget等 | Budgets/Scheduler | cost-control | account情報 | budget | thresholds | Budget名 | bootstrap | 0/17 | Budget残存可 | 最優先 |
-| 15 | `modules/audit/` | module | 監査 | CloudTrail/Analyzer | audit | IAM policy | retention | audit names | Trail ARN | S3 | 18 | audit log判断 | Data Events初期無効 |
-| 16 | `environments/dev/00-foundation/` | ディレクトリ | dev基礎stack | module参照 | network | remote state等 | dev値 | common tags | foundation outputs | bootstrap | 3 | 下位stack先削除 | 環境別方式 |
-| 17 | `environments/dev/10-storage-queue/` | ディレクトリ | S3/SQS | module参照 | storage/queue | remote state | dev値 | common tags | bucket/queue | foundation | 4-6 | object/message確認 | state分離 |
-| 18 | `environments/dev/20-auth/` | ディレクトリ | Cognito | module参照 | cognito | なし | dev値 | common tags | pool/client | bootstrap | 8 | user確認 | state分離 |
-| 19 | `environments/dev/30-database/` | ディレクトリ | RDS | module参照 | rds | foundation remote state | dev値 | common tags | endpoint | foundation | 10 | snapshot/deletion protection | state分離 |
-| 20 | `environments/dev/40-backend/` | ディレクトリ | Lambda/API | module参照 | lambda-api/api-gateway/worker | remote states | artifact path等 | common tags | API URL | 10/20/30 | event source先削除 | state分離 |
-| 21 | `environments/dev/50-frontend/` | ディレクトリ | CloudFront/DNS | module参照 | cloudfront/dns-acm | remote states | domain等 | common tags | distribution URL | storage/backend | 15 | CloudFront disable | state分離 |
-| 22 | `environments/dev/60-operations/` | ディレクトリ | Monitoring/Audit | module参照 | monitoring/cost-control/audit | remote states | threshold等 | common tags | alarms | 全体 | 17-18 | log/監査を残す判断 | state分離 |
-| 23 | `sandboxes/dev/*` | ディレクトリ | 個別学習 | 対象resource | 対象module | 最小限 | sandbox値 | sandbox tags | 検証値 | bootstrap | 19 | 各検証後destroy | 本体へ依存させない |
-| 24 | `providers.tf` | Terraformファイル | AWS provider設定 | なし | なし | なし | region | default tags | なし | 各root | 各Step | rootごと管理 | default tags推奨 |
-| 25 | `backend.tf` | Terraformファイル | S3 backend設定 | なし | なし | なし | backend値はCLI等 | なし | なし | bootstrap | 各root | bucket削除禁止 | secretを書かない |
-| 26 | `variables.tf` | Terraformファイル | 入力定義 | なし | なし | なし | 各種 | なし | なし | 各root/module | 各Step | なし | secret default禁止 |
-| 27 | `locals.tf` | Terraformファイル | 命名・タグ | なし | なし | なし | inputs | name_prefix等 | なし | 各root/module | 各Step | なし | 共通タグ |
-| 28 | `outputs.tf` | Terraformファイル | 出力定義 | なし | なし | なし | なし | なし | ARN/ID等 | 各root/module | 各Step | secret出力禁止 | passwordを出さない |
+| 2 | `modules/network/` | module | VPC/Subnet/SG/Endpoint | VPC関連 | network | AZ等 | CIDR | subnet map | VPC/Subnet/SG | state backend | 3 | 依存resource削除後 | NATなし |
+| 3 | `modules/frontend-storage/` | module | React用S3 | S3関連 | frontend-storage | IAM policy document | bucket設定 | bucket name | bucket名 | state backend | 4 | object/version削除 | Public Access禁止 |
+| 4 | `modules/audio-storage/` | module | 音声用S3、S3通知 | S3関連、`aws_s3_bucket_notification` | audio-storage | IAM policy document | lifecycle、CORS、notification等 | prefix | bucket ARN | queue | 5,13 | Multipart/version/notification確認 | Presigned URL、S3→SQS用 |
+| 5 | `modules/queue/` | module | SQS/DLQ | `aws_sqs_queue`、Queue Policy | queue | IAM policy document | retention、maxReceive | queue names | Queue/DLQ ARN | state backend | 6,13 | message確認 | 音声非同期、S3通知許可 |
+| 6 | `modules/cognito/` | module | 認証 | Cognito関連 | cognito | なし | callback等 | naming | Pool/Client ID | state backend | 8 | user消失注意 | `sub`利用 |
+| 7 | `modules/rds/` | module | PostgreSQL、RDS管理用Secret | RDS関連、RDS managed master password | rds | AZ等 | class、storage | db naming | endpoint/port、Secret ARN | network | 9 | final snapshot、Secret削除状態 | Secret値はoutputしない |
+| 8 | `modules/app-config/` | module | 非機密アプリ設定 | `aws_ssm_parameter` | app-config | なし | parameter map | parameter names | Parameter ARN/name | state backend | 10 | 利用Lambda削除後 | 秘密値は原則Secrets Manager |
+| 9 | `modules/lambda-api/` | module | Spring Boot API | Lambda/IAM/Log Group関連 | lambda-api | IAM policy document | memory、timeout、artifact | log names | function ARN | RDS/Cognito/app-config | 10,12 | API連携解除後 | SnapStart、Presigned権限はStep 12で追加 |
+| 10 | `modules/api-gateway/` | module | HTTP API/JWT Authorizer | API Gateway v2 | api-gateway | なし | routes | route map | API endpoint | Cognito/Lambda API | 11 | route/integration確認 | JWT Authorizer |
+| 11 | `modules/lambda-worker/` | module | 音声処理 | Lambda/Event Source Mapping/IAM | lambda-worker | IAM policy document | memory、timeout | log names | worker ARN | SQS/RDS/Audio S3 | 14 | mapping先に削除 | DLQ前提 |
+| 12 | `modules/cloudfront/` | module | React CDN | CloudFront/OAC | cloudfront | managed policy | domain/cache | origin IDs | distribution domain | Frontend S3 | 15 | disable後削除 | OAC使用 |
+| 13 | `modules/dns-acm/` | module | DNS/TLS | Route53/ACM | dns-acm | hosted zone | domain | records | cert ARN | CloudFront | 16 | DNS順序注意 | 条件付き |
+| 14 | `modules/monitoring/` | module | Logs/Alarm/通知 | CloudWatch/SNS | monitoring | なし | thresholds、subscriptions | alarm/topic names | Alarm/Topic ARN | backend/frontend/database | 17 | log残存・subscription確認 | Alarm→SNS通知 |
+| 15 | `modules/cost-control/` | module | 予算管理 | `aws_budgets_budget` | cost-control | account情報 | budget、thresholds、notification | budget name | Budget名 | state backend | 2 | Budget残存可 | 最優先で構築 |
+| 16 | `modules/scheduler/` | module | 定期運用 | EventBridge Scheduler/IAM Role | scheduler | IAM policy document | schedule、target | schedule name | Schedule ARN | RDS/運用Lambda等 | 17 | schedule停止確認 | RDS停止忘れ防止 |
+| 17 | `modules/audit/` | module | 監査・外部アクセス検知 | CloudTrail/Access Analyzer/Audit S3等 | audit | IAM policy document | retention等 | audit names | Trail/Analyzer ARN | state backend | 18 | audit log保持判断 | Data Events初期無効 |
+| 18 | `environments/dev/00-cost-control/` | root stack | dev予算管理 | module参照 | cost-control | caller identity等 | dev予算値 | common tags | Budget名 | `bootstrap/state-backend/` | 2 | Budgetを残すか判断 | Step 0のCost Explorer確認はTerraform対象外 |
+| 19 | `environments/dev/10-foundation/` | root stack | dev基礎ネットワーク | module参照 | network | remote state等 | dev値 | common tags | VPC/Subnet/SG | `bootstrap/state-backend/` | 3 | 下位stack先削除 | NATなし |
+| 20 | `environments/dev/20-storage-queue/` | root stack | S3/SQS/S3通知 | module参照 | frontend-storage/audio-storage/queue | remote state等 | dev値 | common tags | bucket/queue | `bootstrap/state-backend/` | 4,5,6,13 | object/message/notification確認 | Step 13でS3通知を追加 |
+| 21 | `environments/dev/30-auth/` | root stack | Cognito | module参照 | cognito | なし | dev値 | common tags | pool/client | `bootstrap/state-backend/` | 8 | user確認 | state分離 |
+| 22 | `environments/dev/40-database/` | root stack | RDS/Secrets Manager | module参照 | rds | foundation remote state | dev値 | common tags | endpoint/Secret ARN | `environments/dev/10-foundation/` | 9 | snapshot/deletion protection/Secret確認 | RDS管理用Secretを一体管理 |
+| 23 | `environments/dev/50-backend/` | root stack | Parameter Store/Lambda/API Gateway/Worker | module参照 | app-config/lambda-api/api-gateway/lambda-worker | storage/auth/database remote states | artifact path、parameter等 | common tags | API URL/Lambda ARN | `20-storage-queue`、`30-auth`、`40-database` | 10,11,12,14 | event source→API→Lambda順に解除 | Stepごとに段階追加 |
+| 24 | `environments/dev/60-frontend/` | root stack | CloudFront/DNS/ACM | module参照 | cloudfront/dns-acm | storage/backend remote states | domain等 | common tags | distribution URL | `20-storage-queue`、`50-backend` | 15,16 | DNS解除→CloudFront disable | Step 16は独自ドメイン採用時のみ |
+| 25 | `environments/dev/70-operations/` | root stack | Monitoring/SNS/Scheduler/Audit | module参照 | monitoring/scheduler/audit | database/backend/frontend remote states | threshold、schedule等 | common tags | alarms/topic/schedule/trail | `40-database`、`50-backend`、`60-frontend` | 17,18 | log/監査を残す判断 | Stepごとに段階追加 |
+| 26 | `sandboxes/dev/*` | root stack | 個別学習 | 対象resource | 対象module | 最小限 | sandbox値 | sandbox tags | 検証値 | state backend | 7,19 | 各検証後destroy | 本体へ依存させない |
+| 27 | `providers.tf` | Terraformファイル | AWS provider設定 | なし | なし | なし | region | default tags | なし | 各root | 各Step | rootごと管理 | default tags推奨 |
+| 28 | `backend.tf` | Terraformファイル | S3 backend設定 | なし | なし | なし | backend値はCLI等 | なし | なし | state backend | Step 2以降の各root | bucket削除禁止 | secretを書かない |
+| 29 | `variables.tf` | Terraformファイル | 入力定義 | なし | なし | なし | 各種 | なし | なし | 各root/module | 各Step | なし | secret default禁止 |
+| 30 | `locals.tf` | Terraformファイル | 命名・タグ | なし | なし | なし | inputs | name_prefix等 | なし | 各root/module | 各Step | なし | 共通タグ |
+| 31 | `outputs.tf` | Terraformファイル | 出力定義 | なし | なし | なし | なし | なし | ARN/ID等 | 各root/module | 各Step | secret出力禁止 | password/secret valueを出さない |
 
 ---
 
@@ -261,7 +275,7 @@ infra/
 
 ## 5.1 共通Terraform実行順序
 
-各root stackでは、原則として次の順で実行する。
+Step 1以降でTerraformを使用するroot stackでは、原則として次の順で実行する。
 
 ```bash
 terraform fmt -recursive
@@ -280,53 +294,61 @@ terraform apply tfplan
 - 初回実行
 - `terraform init -upgrade`を意図的に行う
 
+Step 0のAWS Cost Explorer確認はTerraform実行対象外とする。
+
 ## 5.2 Step一覧
 
-| Step | フェーズ | 対象サービス | 目的 | 前提Step | 対象ディレクトリ | 主なresource | AWSでの確認 | 成功条件 | 削除方法 | 次Step |
-|---:|---|---|---|---:|---|---|---|---|---|---|
-| 0 | コスト管理 | AWS Budgets | 予算超過防止 | なし | `60-operations`または先行stack | `aws_budgets_budget` | Billing/Budgets | 通知先と閾値が確認できる | `terraform destroy` | 全Step |
-| 1 | bootstrap | Amazon S3 | tfstate保存 | なし | `bootstrap/state-backend` | `aws_s3_bucket`等 | S3 console | versioning、暗号化、Public Block有効 | 原則削除しない | 全Step |
-| 2 | 基礎 | Provider/IAM | 対象Account確認 | 1 | 各root | provider/data source | `aws sts get-caller-identity` | Account/Region一致 | Role等を個別削除 | 全Step |
-| 3 | network | Amazon VPC | RDS隔離 | 1 | `00-foundation` | VPC/Subnet/SG/Endpoint | VPC console | RDS用private subnet、NATなし | 依存resource後にdestroy | 10 |
-| 4 | storage | Amazon S3 | React保存 | 1 | `10-storage-queue` | S3 frontend | S3 console | anonymous access拒否 | object/version削除後destroy | 15 |
-| 5 | storage | Amazon S3 | 音声保存 | 1 | `10-storage-queue` | S3 audio | S3 console | lifecycle/CORS/Public Block確認 | object/version/Multipart確認 | 12 |
-| 6 | queue | Amazon SQS | 非同期基盤 | 1 | `10-storage-queue` | Queue/DLQ | SQS console | send/receive、DLQ設定 | message確認後destroy | 14 |
-| 7 | compute検証 | AWS Lambda | Java 25単体確認 | 1 | `sandboxes/dev/lambda` | `aws_lambda_function` | Lambda test | Java 25で正常応答 | sandbox destroy | 9/11 |
-| 8 | auth | Amazon Cognito | 認証 | 1 | `20-auth` | User Pool/Client | Cognito console | test userでtoken取得 | user消失確認後destroy | 9 |
-| 9 | API | Amazon API Gateway | JWT付きHTTP API | 7,8 | `40-backend` | API GW v2/Authorizer | API Gateway console/curl | JWTなし401、正常JWT成功 | routes/API destroy | 11 |
-| 10 | database | Amazon RDS | PostgreSQL | 3 | `30-database` | DB instance/Subnet Group | RDS console | private、available、接続成功 | final snapshot後destroy | 11/14 |
-| 11 | backend | AWS Lambda | Spring Boot REST API | 9,10 | `40-backend` | API Lambda/Alias | curl/CloudWatch | CRUD、所有者分離成功 | API連携解除後destroy | 12 |
-| 12 | upload | S3 Presigned URL | 直接アップロード | 5,11 | `40-backend` | IAM/API実装 | curl/browser/S3 | 指定keyだけupload成功 | object削除 | 13 |
-| 13 | event | S3→SQS | 非同期イベント | 6,12 | `10-storage-queue` | `aws_s3_bucket_notification` | SQS message | uploadでmessage到着 | notification削除 | 14 |
-| 14 | worker | AWS Lambda + SQS | 音声変換 | 10,13 | `40-backend` | Worker/Event Source Mapping | Lambda/S3/RDS | 出力生成、DB状態更新 | mapping→Lambda順 | 15 |
-| 15 | frontend | CloudFront | React HTTPS配信 | 4,11 | `50-frontend` | Distribution/OAC | browser/CloudFront | S3直アクセス拒否、CF成功 | disable後destroy | 16 |
-| 16 | domain | Route 53/ACM | 独自ドメイン | 15 | `50-frontend` | cert/record | DNS/HTTPS | 証明書正常、Alias応答 | DNS→CF→cert | 任意 |
-| 17 | operations | CloudWatch/SNS/Scheduler | 監視・停止制御 | 11-15 | `60-operations` | alarms/log groups/schedule | CloudWatch | 意図的エラーでAlarm発火 | alarm/schedule destroy | 運用 |
-| 18 | audit | CloudTrail/Access Analyzer | 監査 | 1 | `60-operations` | trail/analyzer | CloudTrail/Analyzer | 操作イベント/findings確認 | log保持判断後destroy | 運用 |
-| 19 | sandbox | ECR/Backup等 | 個別学習 | 1 | `sandboxes/dev/*` | 対象service | 各console | create→test→destroy完了 | sandbox destroy | なし |
+3章「AWSサービス一覧」で **分類＝推奨** となっているサービスも、構築・確認対象としてすべてStepへ含める。
+
+| Step | フェーズ | 対象サービス | 目的 | 前提Step | 対象ディレクトリ | 主なresource・設定 | AWSでの確認 | 成功条件 | 削除方法 | 次に実施するStep |
+|---:|---|---|---|---|---|---|---|---|---|---|
+| 0 | 事前コスト確認 | AWS Cost Explorer | Terraform構築前のコスト参照可否確認 | なし | Terraform対象外 | resource作成なし | Billing/Cost Explorer | Cost Explorerでサービス別コストを確認できる状態であることを確認する | Terraformでの削除対象なし | 1 |
+| 1 | bootstrap | Amazon S3 | tfstate保存 | なし | `bootstrap/state-backend` | `aws_s3_bucket`等 | S3 console | versioning、暗号化、Public Block有効 | 原則削除しない | 2 |
+| 2 | 基礎 / コスト管理 | Provider/IAM / AWS Budgets | 対象Account・Region確認、予算超過防止 | 1 | `environments/dev/00-cost-control` | provider、`aws_caller_identity`、`aws_budgets_budget` | `aws sts get-caller-identity` / Billing/Budgets | Account/Regionが一致し、Budgetの通知先・閾値を確認できる | Budgetを削除する場合は当該stackで`terraform destroy` | 3 |
+| 3 | network | Amazon VPC | RDS隔離 | 1,2 | `environments/dev/10-foundation` | VPC/Subnet/SG/Endpoint | VPC console | RDS用private subnet、NATなし | 依存resource削除後にdestroy | 4 |
+| 4 | storage | Amazon S3 | React保存 | 1 | `environments/dev/20-storage-queue` | S3 frontend | S3 console | anonymous access拒否 | 環境全体削除時にobject/version削除後destroy | 5 |
+| 5 | storage | Amazon S3 | 音声保存 | 1 | `environments/dev/20-storage-queue` | S3 audio | S3 console | lifecycle/CORS/Public Block確認 | 環境全体削除時にobject/version/Multipart確認後destroy | 6 |
+| 6 | queue | Amazon SQS | 非同期基盤 | 1 | `environments/dev/20-storage-queue` | Queue/DLQ/Queue Policy | SQS console | send/receive、DLQ設定 | 環境全体削除時にmessage確認後destroy | 7 |
+| 7 | compute検証 | AWS Lambda | Java 25単体確認 | 1 | `sandboxes/dev/lambda` | `aws_lambda_function` | Lambda test | Java 25で正常応答 | **同Step内でsandbox destroy** | 8 |
+| 8 | auth | Amazon Cognito | 認証 | 1 | `environments/dev/30-auth` | User Pool/Client | Cognito console | test userでtoken取得 | 環境全体削除時にuser消失確認後destroy | 9 |
+| 9 | database / secret | Amazon RDS / AWS Secrets Manager | PostgreSQL構築、RDS管理用シークレットの安全な管理 | 3 | `environments/dev/40-database` | DB instance/Subnet Group、RDS managed master password | RDS / Secrets Manager console | RDSがprivate・availableで、管理用Secretを確認でき、Terraform outputや平文tfvarsへSecret値を出していない | final snapshot確認後RDSをdestroyし、Secretの削除状態も確認 | 10 |
+| 10 | backend / config | AWS Lambda / AWS Systems Manager Parameter Store | Spring Boot REST API、非機密設定の外部管理 | 8,9 | `environments/dev/50-backend` | `aws_ssm_parameter`、API Lambda/Alias/IAM/Log Group | Lambda / Systems Manager / CloudWatch | Lambda単体invokeでSpring Boot APIが正常応答し、必要なParameterを取得できる | 後続Stepで使用するためここではdestroyしない | 11 |
+| 11 | API | Amazon API Gateway | Cognito JWT付きHTTP APIをLambdaへ接続 | 8,10 | `environments/dev/50-backend` | API Gateway v2/Integration/JWT Authorizer/Routes | API Gateway console / curl | JWTなし401、正常JWTでLambdaへ到達しAPIが成功 | 後続Stepで使用するためここではdestroyしない | 12 |
+| 12 | upload | Amazon S3 Presigned URL | ブラウザから音声S3へ直接アップロード | 5,11 | `environments/dev/50-backend` | Lambda IAM/S3権限/API実装追加 | curl/browser/S3 | 所有権確認後に指定keyだけuploadでき、期限・権限制御を確認できる | object削除。backend stackはdestroyしない | 13 |
+| 13 | event | Amazon S3 → Amazon SQS | 非同期イベント | 5,6,12 | `environments/dev/20-storage-queue` | `aws_s3_bucket_notification`、Queue Policy更新 | SQS message | 音声uploadでSQS message到着 | notification解除は環境全体削除時に実施 | 14 |
+| 14 | worker | AWS Lambda + Amazon SQS | 音声変換・非同期処理 | 5,9,13 | `environments/dev/50-backend` | Worker Lambda/Event Source Mapping/IAM | Lambda/S3/RDS/SQS | 出力生成、DB状態更新、失敗時DLQ動作を確認 | 環境全体削除時はmapping→Lambda順 | 15 |
+| 15 | frontend | Amazon CloudFront | React HTTPS配信 | 4,11 | `environments/dev/60-frontend` | Distribution/OAC | browser/CloudFront | S3直アクセス拒否、CloudFront経由成功 | 環境全体削除時にdisable後destroy | 16または17 |
+| 16 | domain | Amazon Route 53 / AWS Certificate Manager | 独自ドメイン | 15 | `environments/dev/60-frontend` | cert/validation record/Alias record | DNS/HTTPS | 証明書正常、Alias応答 | DNS→CloudFront依存解除→certの順で削除 | 17 |
+| 17 | operations | Amazon CloudWatch / Amazon SNS / Amazon EventBridge Scheduler | ログ・アラーム・通知、RDS停止忘れ防止 | 9,10,11,14,15 | `environments/dev/70-operations` | log groups/alarms、SNS Topic/Subscription、Scheduler Schedule/Role | CloudWatch / SNS / EventBridge Scheduler | 意図的エラーでAlarm→SNS通知を確認でき、SchedulerによるRDS停止用処理を確認できる | 環境全体削除時にalarm/topic/schedule等をdestroy | 18 |
+| 18 | audit | AWS CloudTrail / IAM Access Analyzer | AWS操作監査、外部公開・共有設定の検知 | 1 | `environments/dev/70-operations` | trail/analyzer/Audit S3等 | CloudTrail / IAM Access Analyzer | Terraform等の操作イベントを確認でき、Analyzerのfindingsを確認できる | audit log保持判断後destroy | 19 |
+| 19 | sandbox | Amazon ECR / AWS Backup等 | 個別学習・条件付きサービス検証 | 1 | `sandboxes/dev/*` | 対象service | 各console | create→test→destroy完了 | **各sandbox内でdestroy** | なし |
+
+> Step 16は独自ドメインを初期導入する場合のみ実施する。初期導入しない場合はStep 15からStep 17へ進む。
+
 
 ## 5.3 各Step内の実施単位
 
-各Stepは次のサブStepへ分割する。
+各Terraform Stepは次のサブStepへ分割する。Step 0はTerraform対象外のため、Cost Explorerの確認結果のみ記録する。
 
-1. 対象ディレクトリを作成または確認する。
-2. `versions.tf`、`providers.tf`、`backend.tf`、`main.tf`、`variables.tf`、`locals.tf`、`outputs.tf`を準備する。
-3. `terraform.tfvars.example`に非機密の入力例を定義する。
-4. 実環境の機密値をTerraformコードへ記載しない。
-5. `terraform fmt -recursive`を実行する。
-6. 初回またはbackend/provider/module変更時に`terraform init`を実行する。
-7. `terraform validate`を実行する。
-8. `terraform plan -out=tfplan`を実行する。
-9. Planで作成・変更・削除対象を確認する。
-10. `terraform apply tfplan`を実行する。
-11. AWS ConsoleまたはAWS CLIで対象resourceの状態を確認する。
-12. 疎通・認証・アップロードなど対象サービス固有の試験を行う。
-13. 成功条件を満たしたことを記録する。
-14. 失敗時はTerraform error、CloudWatch Logs、IAM、Security Group、resource状態を順に確認する。
-15. 次Stepが参照するoutputを確認する。
-16. sandboxの場合は同Step内で`terraform destroy`まで確認する。
+1. 4.3「パス一覧」で対象Stepに対応するroot stackとmoduleを確認する。
+2. 同一root stackを前Stepでも使用している場合は既存resourceを維持し、今回のStepで必要なresource/moduleだけを追加する。
+3. 対象ディレクトリの`versions.tf`、`providers.tf`、`backend.tf`、`main.tf`、`variables.tf`、`locals.tf`、`outputs.tf`を作成または更新する。
+4. `terraform.tfvars.example`に非機密の入力例を定義する。
+5. 実環境の機密値をTerraformコードへ記載しない。
+6. `terraform fmt -recursive`を実行する。
+7. 初回またはbackend/provider/module変更時に`terraform init`を実行する。
+8. `terraform validate`を実行する。
+9. `terraform plan -out=tfplan`を実行する。
+10. Planで**今回のStepで意図したresourceだけが追加・変更されること**を確認する。意図しない削除がある場合はapplyしない。
+11. `terraform apply tfplan`を実行する。
+12. AWS ConsoleまたはAWS CLIで、そのStepに記載したすべての対象サービスの状態を確認する。
+13. 疎通・認証・アップロード・通知・設定値取得・監査など、対象サービス固有の試験を行う。
+14. 成功条件を満たしたことを記録する。
+15. 失敗時はTerraform error、CloudWatch Logs、IAM、Security Group、resource状態を順に確認する。
+16. 次Stepが参照するoutputを確認する。Secret値・passwordそのものはoutputしない。
+17. `sandboxes/dev/*`以外では、後続Stepで使用するresourceを途中で`terraform destroy`しない。
+18. sandboxの場合は同Step内で`terraform destroy`まで確認する。
 
----
 
 # 6. コスト試算
 
@@ -555,9 +577,9 @@ RDSを24時間稼働しても概算では予算内だが、CloudFront転送や�
 | Q1 | 要確認 | 音声 | 1ファイルの平均・最大サイズ | Upload方式、S3、転送費 | 実サンプルで計測 | Step 12前 | 未確認 |
 | Q2 | 要確認 | CloudFront/S3 | 月間アップロード・ダウンロード量 | 月額コスト | 開発利用を1か月計測 | 公開前 | 未確認 |
 | Q3 | 要確認 | 音声処理 | FFmpeg等の平均・最大処理時間 | Lambda 15分制限、費用 | Worker benchmark | Step 14前 | 未確認 |
-| Q4 | 要確認 | RDS | 最大接続数・データ量 | instance size/Proxy | 負荷試験 | Step 11前後 | 未確認 |
+| Q4 | 要確認 | RDS | 最大接続数・データ量 | instance size/Proxy | 負荷試験 | Step 10/14前後 | 未確認 |
 | Q5 | 要確認 | Java 25 | 依存ライブラリ互換性 | build/runtime | Java 25 CI build | Step 7 | 未確認 |
-| Q6 | 要確認 | Spring Boot Lambda | Serverless Java Container 3.xとの統合 | API起動 | Integration test | Step 7/11 | 未確認 |
+| Q6 | 要確認 | Spring Boot Lambda | Serverless Java Container 3.xとの統合 | API起動 | Integration test | Step 7/10 | 未確認 |
 | Q7 | 判定保留 | CloudFront | 定額Free/Pro planのTerraform管理 | WAF/転送費 | AWS Provider確認 | Step 15 | 判定保留 |
 | Q8 | 要確認 | DNS | 独自ドメインを初期から使用するか | Route53/ACM費用とStep | Product判断 | Step 16前 | 未確認 |
 | Q9 | 要確認 | コスト | RDS/S3/CloudWatch等の最新東京単価 | 月額差異 | AWS Pricing Calculator | 実装直前 | 未確認 |
