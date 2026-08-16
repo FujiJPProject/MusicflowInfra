@@ -1,0 +1,5 @@
+# プロジェクト名
+project_name = "musicflows"
+
+# AWS Region
+aws_region = "ap-northeast-1"
