@@ -68,3 +68,19 @@ AWSへの接続確認
 ```shell
 aws sts get-caller-identity
 ```
+
+# 修正の流れ
+
+```shell
+docker compose run --rm terraform
+```
+
+```shell
+terraform fmt -recursive
+# --- 必須ではない ---
+terraform init
+# -------------------
+terraform validate
+terraform plan -out=tfplan
+terraform apply tfplan
+```
