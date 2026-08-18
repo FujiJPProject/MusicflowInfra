@@ -1,0 +1,5 @@
+bucket = "musicflows-infra-ap-northeast-1-tfstate-f41aacd0"
+
+region = "ap-northeast-1"
+
+use_lockfile = true
