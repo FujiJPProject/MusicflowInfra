@@ -11,5 +11,14 @@ terraform {
       # provider更新は別途検証してから行う。
       version = "= 6.55.0"
     }
+
+    random = {
+      # State Bucket名の一意性を確保するため、
+      # HashiCorp Random Providerを使用する。
+      source = "hashicorp/random"
+
+      # 実装時点のバージョンへ固定する。
+      version = "= 3.9.0"
+    }
   }
 }

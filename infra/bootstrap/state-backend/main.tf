@@ -1,4 +1,26 @@
+# ============================================================
+# State Bucket名用Random ID
+# ============================================================
+
+resource "random_id" "state_bucket_suffix" {
+  # 4 bytes = 8桁の16進数。
+  #
+  # 例:
+  # a1b2c3d4
+  #
+  # 一度生成された値はTerraform Stateへ保存されるため、
+  # terraform plan/applyのたびに変更されるわけではない。
+  byte_length = 4
+}
+
+# ============================================================
+# AWS Account情報
+# ============================================================
+
 # 現在Terraformを実行しているAWSアカウント情報を取得する。
+#
+# bucket名には使用しないが、
+# Terraform実行Account確認用outputとして引き続き使用する。
 data "aws_caller_identity" "current" {}
 
 
@@ -18,7 +40,6 @@ resource "aws_s3_bucket" "terraform_state" {
     prevent_destroy = true
   }
 }
-
 
 # ============================================================
 # Versioning

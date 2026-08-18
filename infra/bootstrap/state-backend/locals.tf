@@ -1,7 +1,7 @@
 locals {
-  # AWS Account ID + Regionを含めることで、
-  # S3バケット名が他環境と衝突しにくい形にする。
-  state_bucket_name = "${var.project_name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-tfstate"
+  # S3 bucket名はAWS Account IDに依存させず、
+  # random_idで生成したsuffixを付与して一意性を確保する。
+  state_bucket_name = "${var.project_name}-${var.aws_region}-tfstate-${random_id.state_bucket_suffix.hex}"
 
   # すべてのbootstrapリソースへ付与する共通タグ。
   common_tags = {
